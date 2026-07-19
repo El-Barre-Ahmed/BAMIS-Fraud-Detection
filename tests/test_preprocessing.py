@@ -13,6 +13,7 @@ import pandas as pd
 import pytest
 
 from src.data.preprocessing import (
+    COLUMNS_EXPECTED,
     CRITICAL_COLUMNS,
     DATE_COLUMNS,
     NUMERIC_COLUMNS,
@@ -70,6 +71,69 @@ DIRTY_CSV = (
     '"TEL006","  ","EXTERNAL","","","","","","","","","","MOBILE","FR"\n'
 )
 
+# Datetime values use comma as decimal separator for fractional seconds.
+# These fields are intentionally unquoted to reproduce the real ingestion issue.
+FRACTIONAL_DATETIME_COMMA_CSV = (
+    '"TRANSACTION_CODE","SERVICE_CODE","TRANSACTION_STATUS","TRANSACTION_DATE",'
+    '"TRANSACTION_AMOUNT","REQUEST_REFERENCE","REQUEST_DATE","RESPONSE_DATE",'
+    '"SOURCE_PHONE","DESTINATION_PHONE","TRANSACTION_FEES","DESTINATION_TYPE",'
+    '"PARTNER_REFERENCE","BATCH_ID","SOURCE_CUSTOMER","DESTINATION_CUSTOMER",'
+    '"TRANSACTION_DIRECTION","QR_INDICATOR","ACCOUNTING_RESPONSE_DATE",'
+    '"ACCOUNTING_REQUEST_DATE","SETTLEMENT_STATUS","CHANNEL_TYPE","LANGUAGE_CODE"\n'
+    '"TXF01","SERVICE_06","VALIDATED",12/06/22 15:05:44,421000000,"500000","REFX",'
+    '"12/06/22 15:05:45","12/06/22 15:05:46","TEL001","TEL002","10","EXTERNAL",'
+    '"","","","","","","","0","MOBILE","FR"\n'
+    '"TXF02","SERVICE_08","REJECTED","13/06/22 16:00:00","600000","REFY",'
+    '13/06/22 16:01:00,123000000,13/06/22 16:01:05,456000000,"TEL003","TEL004",'
+    '"20","INTERNAL","","","","","","","","0","WEB","FR"\n'
+)
+
+# French decimal comma in TRANSACTION_AMOUNT (24 fields after datetime fix)
+# Raw line: 3 datetime commas (add 3 fields) + 1 French decimal in AMOUNT = 27 raw fields
+# After datetime fix: 27 - 3 = 24 fields → algorithm merges AMOUNT
+FRENCH_DECIMAL_AMOUNT_CSV = (
+    '"TRANSACTION_CODE","SERVICE_CODE","TRANSACTION_STATUS","TRANSACTION_DATE",'
+    '"TRANSACTION_AMOUNT","REQUEST_REFERENCE","REQUEST_DATE","RESPONSE_DATE",'
+    '"SOURCE_PHONE","DESTINATION_PHONE","TRANSACTION_FEES","DESTINATION_TYPE",'
+    '"PARTNER_REFERENCE","BATCH_ID","SOURCE_CUSTOMER","DESTINATION_CUSTOMER",'
+    '"TRANSACTION_DIRECTION","QR_INDICATOR","ACCOUNTING_RESPONSE_DATE",'
+    '"ACCOUNTING_REQUEST_DATE","SETTLEMENT_STATUS","CHANNEL_TYPE","LANGUAGE_CODE"\n'
+    '"TXA01","SERVICE_09","VALIDATED",12/06/22 15:05:44,421000000,"500000","REFA",'
+    '12/06/22 15:05:45,123000000,12/06/22 15:05:46,456000000,"TEL001","TEL002","10","EXTERNAL",'
+    '"","","","","","","","","0","MOBILE","FR"\n'
+    '"TXA02","SERVICE_09","VALIDATED",12/06/22 16:00:00,123000000,5,5,"",'
+    '12/06/22 16:00:01,789000000,12/06/22 16:00:02,111000000,"TEL003","TEL004","20","INTERNAL",'
+    '"","","","","","","","","0","WEB","FR"\n'
+)
+
+# French decimal comma in TRANSACTION_FEES (24 fields after datetime fix)
+# Raw line: 3 datetime commas + 1 French decimal in FEES = 27 raw fields
+FRENCH_DECIMAL_FEES_CSV = (
+    '"TRANSACTION_CODE","SERVICE_CODE","TRANSACTION_STATUS","TRANSACTION_DATE",'
+    '"TRANSACTION_AMOUNT","REQUEST_REFERENCE","REQUEST_DATE","RESPONSE_DATE",'
+    '"SOURCE_PHONE","DESTINATION_PHONE","TRANSACTION_FEES","DESTINATION_TYPE",'
+    '"PARTNER_REFERENCE","BATCH_ID","SOURCE_CUSTOMER","DESTINATION_CUSTOMER",'
+    '"TRANSACTION_DIRECTION","QR_INDICATOR","ACCOUNTING_RESPONSE_DATE",'
+    '"ACCOUNTING_REQUEST_DATE","SETTLEMENT_STATUS","CHANNEL_TYPE","LANGUAGE_CODE"\n'
+    '"TXF01","SERVICE_08","VALIDATED",13/06/22 16:00:00,123000000,"3960","",'
+    '13/06/22 16:00:01,456000000,13/06/22 16:00:05,789000000,"TEL001","TEL002",39,6,"EXTERNAL",'
+    '"","","","","","","","","0","MOBILE","FR"\n'
+)
+
+# French decimal comma in BOTH AMOUNT and FEES (25 fields after datetime fix)
+# Raw line: 3 datetime commas + 2 French decimals = 28 raw fields
+FRENCH_DECIMAL_BOTH_CSV = (
+    '"TRANSACTION_CODE","SERVICE_CODE","TRANSACTION_STATUS","TRANSACTION_DATE",'
+    '"TRANSACTION_AMOUNT","REQUEST_REFERENCE","REQUEST_DATE","RESPONSE_DATE",'
+    '"SOURCE_PHONE","DESTINATION_PHONE","TRANSACTION_FEES","DESTINATION_TYPE",'
+    '"PARTNER_REFERENCE","BATCH_ID","SOURCE_CUSTOMER","DESTINATION_CUSTOMER",'
+    '"TRANSACTION_DIRECTION","QR_INDICATOR","ACCOUNTING_RESPONSE_DATE",'
+    '"ACCOUNTING_REQUEST_DATE","SETTLEMENT_STATUS","CHANNEL_TYPE","LANGUAGE_CODE"\n'
+    '"TXB01","SERVICE_08","VALIDATED",21/07/22 12:21:51,613000000,2,2,"",'
+    '21/07/22 12:21:52,123000000,21/07/22 12:21:53,456000000,"TEL001","TEL002",0,01,"EXTERNAL",'
+    '"","","","","","","","","0","MOBILE","FR"\n'
+)
+
 
 @pytest.fixture
 def minimal_df(tmp_path: Path) -> pd.DataFrame:
@@ -116,6 +180,20 @@ class TestLoadRaw:
         assert "SERVICE_CODE" in object_cols
         assert "SOURCE_PHONE" in object_cols
 
+    def test_repairs_fractional_datetime_comma_without_schema_shift(self, tmp_path):
+        csv_file = tmp_path / "fractional.csv"
+        csv_file.write_text(FRACTIONAL_DATETIME_COMMA_CSV)
+
+        df = load_raw(csv_file)
+
+        from src.data.preprocessing import COLUMNS_EXPECTED
+
+        assert list(df.columns) == COLUMNS_EXPECTED
+        assert df.loc[0, "TRANSACTION_DATE"] == "12/06/22 15:05:44.421000000"
+        assert df.loc[0, "TRANSACTION_AMOUNT"] == "500000"
+        assert df.loc[1, "REQUEST_DATE"] == "13/06/22 16:01:00.123000000"
+        assert df.loc[1, "RESPONSE_DATE"] == "13/06/22 16:01:05.456000000"
+
 
 # ---------------------------------------------------------------------------
 # _parse_dates
@@ -149,6 +227,23 @@ class TestParseDates:
         df = load_raw(csv_file)
         result = _parse_dates(df)
         assert pd.isna(result["TRANSACTION_DATE"].iloc[0])
+
+    def test_fractional_seconds_are_preserved(self, tmp_path):
+        csv_file = tmp_path / "fractional_date.csv"
+        csv_file.write_text(FRACTIONAL_DATETIME_COMMA_CSV)
+
+        df = load_raw(csv_file)
+        result = _parse_dates(df)
+
+        assert result["TRANSACTION_DATE"].iloc[0] == pd.Timestamp(
+            "2022-06-12 15:05:44.421000000"
+        )
+        assert result["REQUEST_DATE"].iloc[1] == pd.Timestamp(
+            "2022-06-13 16:01:00.123000000"
+        )
+        assert result["RESPONSE_DATE"].iloc[1] == pd.Timestamp(
+            "2022-06-13 16:01:05.456000000"
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -287,6 +382,19 @@ class TestPreprocess:
         )
         assert np.allclose(ratio, 1e-6)
 
+    def test_fractional_datetime_csv_end_to_end(self, tmp_path):
+        csv_file = tmp_path / "fractional_pipeline.csv"
+        csv_file.write_text(FRACTIONAL_DATETIME_COMMA_CSV)
+
+        result = preprocess(csv_file)
+
+        assert len(result) == 2
+        assert result["TRANSACTION_AMOUNT"].iloc[0] == pytest.approx(500000.0)
+        assert result["TRANSACTION_AMOUNT"].iloc[1] == pytest.approx(600000.0)
+        assert result["TRANSACTION_DATE"].iloc[0] == pd.Timestamp(
+            "2022-06-12 15:05:44.421000000"
+        )
+
 
 # ---------------------------------------------------------------------------
 # data_quality_report
@@ -312,3 +420,65 @@ class TestDataQualityReport:
         assert "date_range" in report
         assert "min" in report["date_range"]
         assert "max" in report["date_range"]
+
+
+# ---------------------------------------------------------------------------
+# French decimal comma handling
+# ---------------------------------------------------------------------------
+
+
+class TestFrenchDecimalComma:
+    def test_amount_decimal_comma(self, tmp_path):
+        csv_file = tmp_path / "amount_decimal.csv"
+        csv_file.write_text(FRENCH_DECIMAL_AMOUNT_CSV)
+        df = load_raw(csv_file)
+        assert list(df.columns) == COLUMNS_EXPECTED
+        assert len(df) == 2
+        assert df.loc[1, "TRANSACTION_DATE"] == "12/06/22 16:00:00.123000000"
+        assert df.loc[1, "TRANSACTION_AMOUNT"] == "5.5"
+        # REQUEST_REFERENCE is "" in CSV which becomes NaN after _clean_strings
+        assert pd.isna(df.loc[1, "REQUEST_REFERENCE"])
+
+    def test_fees_decimal_comma(self, tmp_path):
+        csv_file = tmp_path / "fees_decimal.csv"
+        csv_file.write_text(FRENCH_DECIMAL_FEES_CSV)
+        df = load_raw(csv_file)
+        assert list(df.columns) == COLUMNS_EXPECTED
+        assert len(df) == 1
+        assert df.loc[0, "TRANSACTION_AMOUNT"] == "3960"
+        assert df.loc[0, "TRANSACTION_FEES"] == "39.6"
+
+    def test_both_decimal_comma(self, tmp_path):
+        csv_file = tmp_path / "both_decimal.csv"
+        csv_file.write_text(FRENCH_DECIMAL_BOTH_CSV)
+        df = load_raw(csv_file)
+        assert list(df.columns) == COLUMNS_EXPECTED
+        assert len(df) == 1
+        assert df.loc[0, "TRANSACTION_DATE"] == "21/07/22 12:21:51.613000000"
+        assert df.loc[0, "TRANSACTION_AMOUNT"] == "2.2"
+        assert df.loc[0, "TRANSACTION_FEES"] == "0.01"
+
+    def test_end_to_end_preprocess_amount_decimal(self, tmp_path):
+        csv_file = tmp_path / "amount_pipeline.csv"
+        csv_file.write_text(FRENCH_DECIMAL_AMOUNT_CSV)
+        result = preprocess(csv_file)
+        assert len(result) == 2
+        assert result["TRANSACTION_AMOUNT"].iloc[1] == pytest.approx(5.5)
+        assert result["TRANSACTION_DATE"].iloc[1] == pd.Timestamp(
+            "2022-06-12 16:00:00.123000000"
+        )
+
+    def test_end_to_end_preprocess_fees_decimal(self, tmp_path):
+        csv_file = tmp_path / "fees_pipeline.csv"
+        csv_file.write_text(FRENCH_DECIMAL_FEES_CSV)
+        result = preprocess(csv_file)
+        assert len(result) == 1
+        assert result["TRANSACTION_FEES"].iloc[0] == pytest.approx(39.6)
+
+    def test_end_to_end_preprocess_both_decimal(self, tmp_path):
+        csv_file = tmp_path / "both_pipeline.csv"
+        csv_file.write_text(FRENCH_DECIMAL_BOTH_CSV)
+        result = preprocess(csv_file)
+        assert len(result) == 1
+        assert result["TRANSACTION_AMOUNT"].iloc[0] == pytest.approx(2.2)
+        assert result["TRANSACTION_FEES"].iloc[0] == pytest.approx(0.01)
