@@ -15,6 +15,8 @@ Pipeline steps
 """
 
 import logging
+import re
+import tempfile
 from pathlib import Path
 from typing import Optional
 
@@ -76,6 +78,20 @@ CRITICAL_COLUMNS = [
     "SOURCE_PHONE",
 ]
 
+DATE_PARSE_FORMATS = [
+    "%d/%m/%y %H:%M:%S.%f",
+    "%d/%m/%y %H:%M:%S",
+    "%d/%m/%Y %H:%M:%S.%f",
+    "%d/%m/%Y %H:%M:%S",
+]
+
+_DATETIME_COMMA_FRACTION_RE = re.compile(
+    r"^(\d{2}/\d{2}/(?:\d{2}|\d{4}) \d{2}:\d{2}:\d{2}),(\d{1,9})$"
+)
+_DATETIME_EMBEDDED_COMMA_RE = re.compile(
+    r"(\d{2}/\d{2}/(?:\d{2}|\d{4}) \d{2}:\d{2}:\d{2}),(\d{1,9})(?=,|$)"
+)
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -104,15 +120,19 @@ def load_raw(path: Optional[Path] = None) -> pd.DataFrame:
         raise FileNotFoundError(f"Dataset not found at: {path}")
 
     logger.info("Loading dataset from %s", path)
-    df = pd.read_csv(
-        path,
-        sep=",",
-        quotechar='"',
-        dtype=str,
-        on_bad_lines="warn",
-        low_memory=False,
-        encoding="utf-8",
-    )
+    normalized_path = _build_normalized_csv(path)
+    try:
+        df = pd.read_csv(
+            normalized_path,
+            sep=",",
+            quotechar='"',
+            dtype=str,
+            low_memory=False,
+            encoding="utf-8",
+            encoding_errors="replace",
+        )
+    finally:
+        normalized_path.unlink(missing_ok=True)
     # Strip leading/trailing whitespace from column names
     df.columns = df.columns.str.strip().str.upper()
 
@@ -199,13 +219,114 @@ def _parse_dates(df: pd.DataFrame) -> pd.DataFrame:
     """Cast date columns to ``datetime64``, coercing unparseable values to NaT."""
     for col in DATE_COLUMNS:
         if col in df.columns:
-            df[col] = pd.to_datetime(
-                df[col].str.strip(),
-                format="mixed",
-                dayfirst=True,
-                errors="coerce",
-            )
+            df[col] = _parse_datetime_series(df[col])
     return df
+
+
+_NUM_RE = re.compile(r"^\d{1,3}$")
+
+EXPECTED_FIELDS = 23
+AMOUNT_DECIMAL_FIELD = 5
+FEES_DECIMAL_FIELD = 11
+
+
+def _build_normalized_csv(path: Path) -> Path:
+    """Create a normalized CSV fixing datetime fractional commas AND French decimal commas.
+
+    Algorithm:
+      1. Fix datetime fractional commas (existing).
+      2. Split by comma, count fields.
+      3. If 24 fields: one French decimal — merge AMOUNT (field[5]) or FEES (field[15]).
+      4. If 25 fields: two French decimals — merge both.
+      5. Otherwise: leave untouched.
+    """
+    datetime_fixes = 0
+    amount_fixes = 0
+    fees_fixes = 0
+    skipped_rows = 0
+    tmp = tempfile.NamedTemporaryFile(
+        mode="w",
+        suffix=".csv",
+        delete=False,
+        encoding="utf-8",
+        newline="",
+    )
+
+    with path.open("r", encoding="utf-8", errors="replace") as src, tmp:
+        header = src.readline()
+        if not header:
+            raise ValueError("Dataset file is empty")
+        tmp.write(header)
+
+        for line in src:
+            fixed_line, replacements = _DATETIME_EMBEDDED_COMMA_RE.subn(
+                r"\1.\2",
+                line,
+            )
+            datetime_fixes += replacements
+
+            fields = fixed_line.rstrip("\n").split(",")
+            n = len(fields)
+
+            if n == EXPECTED_FIELDS:
+                tmp.write(fixed_line)
+            elif n == EXPECTED_FIELDS + 1:
+                if _NUM_RE.match(fields[AMOUNT_DECIMAL_FIELD]):
+                    fields[4] = f"{fields[4]}.{fields[AMOUNT_DECIMAL_FIELD]}"
+                    del fields[AMOUNT_DECIMAL_FIELD]
+                    amount_fixes += 1
+                elif _NUM_RE.match(fields[FEES_DECIMAL_FIELD]):
+                    fields[10] = f"{fields[10]}.{fields[FEES_DECIMAL_FIELD]}"
+                    del fields[FEES_DECIMAL_FIELD]
+                    fees_fixes += 1
+                else:
+                    skipped_rows += 1
+                tmp.write(",".join(fields) + "\n")
+            elif n == EXPECTED_FIELDS + 2:
+                merged = False
+                if _NUM_RE.match(fields[AMOUNT_DECIMAL_FIELD]):
+                    fields[4] = f"{fields[4]}.{fields[AMOUNT_DECIMAL_FIELD]}"
+                    del fields[AMOUNT_DECIMAL_FIELD]
+                    amount_fixes += 1
+                    merged = True
+                if _NUM_RE.match(fields[FEES_DECIMAL_FIELD]):
+                    fields[10] = f"{fields[10]}.{fields[FEES_DECIMAL_FIELD]}"
+                    del fields[FEES_DECIMAL_FIELD]
+                    fees_fixes += 1
+                    merged = True
+                if not merged:
+                    skipped_rows += 1
+                tmp.write(",".join(fields) + "\n")
+            else:
+                skipped_rows += 1
+                tmp.write(fixed_line)
+
+    logger.info(
+        "Normalized CSV: %d datetime fixes, %d AMOUNT fixes, %d FEES fixes, %d skipped",
+        datetime_fixes, amount_fixes, fees_fixes, skipped_rows,
+    )
+
+    return Path(tmp.name)
+
+
+def _parse_datetime_series(series: pd.Series) -> pd.Series:
+    """Parse BAMIS datetime strings while preserving fractional seconds."""
+    raw = series.fillna("").astype(str).str.strip()
+    # Accept both "HH:MM:SS,fffffffff" and "HH:MM:SS.fffffffff" forms.
+    raw = raw.str.replace(_DATETIME_COMMA_FRACTION_RE, r"\1.\2", regex=True)
+
+    parsed = pd.Series(pd.NaT, index=series.index, dtype="datetime64[ns]")
+    for fmt in DATE_PARSE_FORMATS:
+        mask = parsed.isna() & raw.ne("")
+        if not mask.any():
+            break
+        parsed.loc[mask] = pd.to_datetime(
+            raw.loc[mask],
+            format=fmt,
+            dayfirst=True,
+            errors="coerce",
+        )
+    return parsed
 
 
 def _parse_numerics(df: pd.DataFrame) -> pd.DataFrame:
