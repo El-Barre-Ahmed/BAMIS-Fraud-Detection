@@ -323,6 +323,32 @@ Chaque décision peut être reconstruite :
 Transaction → Features → Evidence → Score → Explication
 
 ---
+# 🖥️ Plateforme d'aide à la décision antifraude
+
+Afin de valoriser les résultats du pipeline Data Science, une plateforme interactive sera développée au-dessus des sorties générées par les différents moteurs de détection.
+
+Cette plateforme permet aux analystes fraude de :
+
+Explorer les transactions à risque.
+Visualiser les scores de risque.
+Consulter les explications associées à chaque alerte.
+Identifier les comptes présentant des comportements suspects.
+Explorer les relations entre clients grâce à l'analyse des graphes.
+Faciliter la priorisation des investigations. 
+
+# Objectif métier
+
+La plateforme ne remplace pas l'expert fraude. Elle agit comme un système d'aide à la décision permettant de réduire le temps d'analyse et d'améliorer la compréhension des alertes.
+
+Chaque décision est accompagnée de preuves :
+
+Signaux métier détectés.
+Facteurs comportementaux.
+Anomalies statistiques.
+Relations réseau suspectes.
+Explication générée automatiquement.
+
+Ainsi, l'investigateur peut passer d'une simple alerte à une analyse complète et justifiée.
 
 # 🚀 Perspectives
 
